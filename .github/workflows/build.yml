@@ -1,0 +1,83 @@
+name: Build iPhone app (unsigned IPA)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Get code
+        uses: actions/checkout@v4
+
+      - name: Fix project file format
+        run: |
+          PROJ=$(find . -maxdepth 3 -name "OmGanpati.xcodeproj" | head -1)
+          echo "Project found at: $PROJ"
+          python3 - "$PROJ/project.pbxproj" <<'PY'
+          import plistlib, re, sys
+          p = sys.argv[1]
+          raw = open(p, 'rb').read()
+          if raw.startswith(b'<?xml') or raw.startswith(b'bplist'):
+              d = plistlib.loads(raw)
+              ok = re.compile(r'^[A-Za-z0-9_$/.:]+$')
+              def q(s):
+                  s = str(s)
+                  if s and ok.match(s): return s
+                  return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
+              def emit(v, n):
+                  t = '\t' * n
+                  if isinstance(v, dict):
+                      out = '{\n'
+                      for k, x in v.items():
+                          out += t + '\t' + q(k) + ' = ' + emit(x, n + 1) + ';\n'
+                      return out + t + '}'
+                  if isinstance(v, list):
+                      out = '(\n'
+                      for x in v:
+                          out += t + '\t' + emit(x, n + 1) + ',\n'
+                      return out + t + ')'
+                  if isinstance(v, bool):
+                      return 'YES' if v else 'NO'
+                  return q(v)
+              d['objectVersion'] = 55
+              for o in d['objects'].values():
+                  if o.get('isa') == 'PBXProject':
+                      o['compatibilityVersion'] = 'Xcode 13.0'
+              open(p, 'w').write('// !$*UTF8*$!\n' + emit(d, 0) + '\n')
+              print('Converted project file to text format')
+          else:
+              print('Project file already in text format')
+          PY
+          head -8 "$PROJ/project.pbxproj"
+
+      - name: Build (no code signing)
+        run: |
+          PROJ=$(find . -maxdepth 3 -name "OmGanpati.xcodeproj" | head -1)
+          xcodebuild \
+            -project "$PROJ" \
+            -target OmGanpati \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Make IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Release-iphoneos/OmGanpati.app Payload/
+          zip -qr OmGanpati.ipa Payload
+
+      - name: Save IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: OmGanpati-ipa
+          path: OmGanpati.ipa
+
+
